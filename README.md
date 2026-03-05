@@ -1,18 +1,71 @@
-# ASCII LLM LoRA (Python, sans Docker)
+﻿# ASCII AI Dolphin
 
-Projet base sur **LoRA/QLoRA** avec:
-- modele de base: `dphn/dolphin-2.9-llama3-8b`
-- generation d'ASCII art
-- ingestion datasets en streaming ligne par ligne (RAM reduite)
+LoRA/QLoRA fine-tuning pipeline for generating ASCII art with `dphn/dolphin-2.9-llama3-8b`.
 
-## Datasets utilises
+- No Docker required.
+- Streaming dataset pipeline (low RAM friendly).
+- Terminal inference + single-script web chat UI.
+- Benchmark script with CSV/JSON report + PNG chart.
 
-- `mrzjy/ascii_art_generation_140k`
-- `apehex/ascii-art`
-- `apehex/ascii-art-datacompdr-12m`
-- `ASCII ART EMPORIUM` local (optionnel)
+## Table of Contents
+
+- [Project Scope](#project-scope)
+- [Current Model Setup](#current-model-setup)
+- [Repository Layout](#repository-layout)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Hugging Face Authentication](#hugging-face-authentication)
+- [Configuration](#configuration)
+- [Dataset Download](#dataset-download)
+- [Training](#training)
+- [Run the Model (Terminal)](#run-the-model-terminal)
+- [Run the Chat UI](#run-the-chat-ui)
+- [Benchmark](#benchmark)
+- [Troubleshooting](#troubleshooting)
+- [Notes About GGUF](#notes-about-gguf)
+
+## Project Scope
+
+This project fine-tunes a LoRA adapter on top of `dphn/dolphin-2.9-llama3-8b` for ASCII art generation.
+It is optimized for practical local training and inference on limited memory systems.
+
+## Current Model Setup
+
+- Base model: `dphn/dolphin-2.9-llama3-8b`
+- Fine-tuning method: LoRA / QLoRA (4-bit)
+- Default adapter output: `outputs/dolphin-ascii-lora`
+- Default generation behavior: ASCII-art-only system prompt
+
+## Repository Layout
+
+```text
+ascii-ai/
+  src/ascii_llm/
+    data.py             # streaming dataset ingestion and normalization
+    train.py            # LoRA training entry logic
+    infer.py            # one-shot + interactive inference
+    benchmark.py        # benchmark + chart generation
+    download.py         # dataset download/cache utility
+    runtime.py          # model/tokenizer loading + generation helpers
+  config.json           # main runtime/training configuration
+  train_ascii.py        # wrapper -> src.ascii_llm.train
+  infer_ascii.py        # wrapper -> src.ascii_llm.infer
+  benchmark_ascii.py    # wrapper -> src.ascii_llm.benchmark
+  download_datasets.py  # wrapper -> src.ascii_llm.download
+  run_model_terminal.py # convenience interactive terminal launcher
+  chat_ui.py            # single-script web chat UI (Gradio)
+```
+
+## Requirements
+
+- Python 3.10+
+- NVIDIA GPU strongly recommended for 8B fine-tuning/inference
+- CUDA-compatible PyTorch installation
+- Hugging Face account/token for gated/private models or datasets
 
 ## Installation
+
+### Windows (PowerShell)
 
 ```powershell
 python -m venv .venv
@@ -20,107 +73,235 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Si tu veux activer le venv dans PowerShell:
+If script activation is blocked:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\Activate.ps1
 ```
 
-## Login Hugging Face
+### Linux/macOS
 
-`dphn/dolphin-2.9-llama3-8b` peut necessiter un token:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -r requirements.txt
+```
+
+## Hugging Face Authentication
+
+If the base model or some datasets are gated, login first:
 
 ```powershell
 .\.venv\Scripts\huggingface-cli.exe login
 ```
 
-## Config
+(or `huggingface-cli login` on Linux/macOS).
 
-Fichier principal: `config.json`
+## Configuration
 
-- `base_model`: `dphn/dolphin-2.9-llama3-8b`
-- `dataset`: sources streaming
-- `quantization`: 4-bit QLoRA
-- `lora`: parametres LoRA
-- `training.debug.enabled`: `true` par defaut (ultra debug)
+Main file: `config.json`
 
-## Download des datasets
+Key sections:
 
-Snapshot local:
+- `base_model`: HF model ID to load.
+- `dataset.sources`: list of dataset sources (HF + optional local emporium).
+- `quantization`: 4-bit loading options.
+- `lora`: LoRA rank/alpha/dropout/target modules.
+- `training`: batch size, grad accumulation, logging, save strategy.
+- `generation`: temperature/top_p/max tokens/repetition penalty.
+
+Default datasets in config:
+
+- `mrzjy/ascii_art_generation_140k`
+- `apehex/ascii-art`
+- `apehex/ascii-art-datacompdr-12m`
+- local optional: `ASCII ART EMPORIUM` in `data/ascii_art_emporium`
+
+## Dataset Download
+
+You can either snapshot full dataset repos locally, or just warm the HF cache.
+
+### Snapshot method (full local copy)
 
 ```powershell
 .\.venv\Scripts\python.exe download_datasets.py --config config.json --method snapshot
 ```
 
-Cache HF (plus leger):
+### Cache method (lighter)
 
 ```powershell
 .\.venv\Scripts\python.exe download_datasets.py --config config.json --method cache --stream-rows 5000
 ```
 
-## Training LoRA
+### Extra options
 
-Preview dataset uniquement:
+```powershell
+# force non-streaming full cache for each source
+.\.venv\Scripts\python.exe download_datasets.py --config config.json --method cache --full-cache
+
+# download only selected source(s)
+.\.venv\Scripts\python.exe download_datasets.py --config config.json --method snapshot --source apehex/ascii-art
+```
+
+Manifest output is written to `data/raw/hf/download_manifest.json` by default.
+
+## Training
+
+Training uses streaming records and dynamic padding in the collator.
+
+### Preview streaming samples only
 
 ```powershell
 .\.venv\Scripts\python.exe train_ascii.py --config config.json --prepare-only
 ```
 
-Train:
+### Start LoRA training
 
 ```powershell
 .\.venv\Scripts\python.exe train_ascii.py --config config.json
 ```
 
-Desactiver debug:
+### Debug modes
+
+Debug logging is enabled by default in `config.json` (`training.debug.enabled=true`).
 
 ```powershell
+# force debug ON
+.\.venv\Scripts\python.exe train_ascii.py --config config.json --debug
+
+# disable debug logs
 .\.venv\Scripts\python.exe train_ascii.py --config config.json --no-debug
 ```
 
-Sortie:
+### Interrupt behavior (Ctrl+C)
+
+If you stop training with `Ctrl+C`, the script catches the interruption and saves the current LoRA adapter + tokenizer to `training.output_dir`.
+
+Output directory (default):
+
 - `outputs/dolphin-ascii-lora`
 
-Si tu fais `Ctrl+C`, le script sauvegarde l'etat LoRA courant dans le dossier de sortie.
+## Run the Model (Terminal)
 
-## Run model
-
-One-shot:
+### One-shot prompt
 
 ```powershell
-.\.venv\Scripts\python.exe infer_ascii.py --config config.json --prompt "cat"
+.\.venv\Scripts\python.exe infer_ascii.py --config config.json --prompt "draw a cat"
 ```
 
-Interactif:
+### Interactive terminal mode
 
 ```powershell
 .\.venv\Scripts\python.exe run_model_terminal.py --config config.json
 ```
 
-## Chat UI (script unique, sans backend separe)
+Or directly:
 
-Lance une UI web style chatbot (grande zone chat + onglets de chats a droite):
+```powershell
+.\.venv\Scripts\python.exe infer_ascii.py --config config.json --interactive
+```
+
+Useful flags:
+
+```powershell
+.\.venv\Scripts\python.exe infer_ascii.py --config config.json --prompt "draw a skull" --max-new-tokens 512
+.\.venv\Scripts\python.exe infer_ascii.py --config config.json --adapter-path outputs/dolphin-ascii-lora
+.\.venv\Scripts\python.exe infer_ascii.py --config config.json --no-4bit
+```
+
+## Run the Chat UI
+
+The UI is a single Python script (`chat_ui.py`) with no custom backend service to manage.
+
+### Launch
 
 ```powershell
 .\.venv\Scripts\python.exe chat_ui.py --config config.json --inbrowser
 ```
 
-Options utiles:
+### Features
+
+- Large chat area
+- Right-side chat tabs (create/delete/switch sessions)
+- Generation controls (max tokens, temperature, top-p, repetition penalty)
+- Quick prompt presets
+
+### Options
 
 ```powershell
 .\.venv\Scripts\python.exe chat_ui.py --config config.json --host 127.0.0.1 --port 7860
-.\.venv\Scripts\python.exe chat_ui.py --config config.json --no-4bit
 .\.venv\Scripts\python.exe chat_ui.py --config config.json --adapter-path outputs/dolphin-ascii-lora
+.\.venv\Scripts\python.exe chat_ui.py --config config.json --no-4bit
+.\.venv\Scripts\python.exe chat_ui.py --config config.json --share
 ```
 
-## Benchmark + Graphique
+## Benchmark
+
+Evaluate the model on sampled training records and generate quality artifacts.
 
 ```powershell
 .\.venv\Scripts\python.exe benchmark_ascii.py --config config.json --samples 64
 ```
 
-Sorties:
+Outputs:
+
 - `benchmarks/<timestamp>/metrics.json`
 - `benchmarks/<timestamp>/samples.csv`
 - `benchmarks/<timestamp>/benchmark.png`
+
+Status is reported as:
+
+- `good` if pass rate and similarity thresholds are met
+- `needs_work` otherwise
+
+## Troubleshooting
+
+### PowerShell cannot activate venv
+
+Use:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+### `RepositoryNotFoundError` / `401` from Hugging Face
+
+- Verify dataset/model ID in `config.json`
+- Login with `huggingface-cli login`
+- Confirm that your account has access if repo is gated/private
+
+### Model loads in `base` mode instead of `lora`
+
+This means no adapter was found in the expected output directory. Check:
+
+- adapter path exists (`outputs/dolphin-ascii-lora` by default)
+- `adapter_config.json` is present
+- pass `--adapter-path ...` explicitly if needed
+
+### Out-of-memory (OOM)
+
+Try one or more:
+
+- keep `load_in_4bit=true`
+- reduce `max_seq_length`
+- reduce `per_device_train_batch_size`
+- increase `gradient_accumulation_steps`
+- reduce `max_new_tokens` at inference
+
+### Extremely verbose logs during training
+
+Debug is intentionally very verbose by default. Disable it with:
+
+```powershell
+.\.venv\Scripts\python.exe train_ascii.py --config config.json --no-debug
+```
+
+## Notes About GGUF
+
+This project trains and serves LoRA adapters in Hugging Face/PEFT format.
+
+- It is not a native GGUF training pipeline.
+- If you need GGUF for `llama.cpp`, you can convert/export separately after training.
