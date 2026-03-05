@@ -1,0 +1,101 @@
+{
+  "base_model": "dphn/dolphin-2.9-llama3-8b",
+  "trust_remote_code": false,
+  "seed": 42,
+  "max_seq_length": 1024,
+  "system_prompt": "You are an ASCII art specialist. Return ASCII art only and preserve spacing exactly.",
+  "dataset": {
+    "cache_dir": "cache/hf",
+    "prepare_preview_samples": 8,
+    "shuffle": true,
+    "samples_per_source": 120000,
+    "sources": [
+      {
+        "type": "huggingface",
+        "name": "mrzjy/ascii_art_generation_140k",
+        "split": "train",
+        "streaming": true,
+        "optional": false,
+        "instruction_fallback": "Generate ASCII art matching the user request."
+      },
+      {
+        "type": "huggingface",
+        "name": "apehex/ascii-art",
+        "split": "train",
+        "streaming": true,
+        "optional": false,
+        "instruction_fallback": "Generate ASCII art matching the user request."
+      },
+      {
+        "type": "huggingface",
+        "name": "apehex/ascii-art-datacompdr-12m",
+        "split": "train",
+        "streaming": true,
+        "optional": false,
+        "instruction_fallback": "Generate ASCII art matching the user request."
+      },
+      {
+        "type": "local_emporium",
+        "name": "ASCII ART EMPORIUM",
+        "path": "data/ascii_art_emporium",
+        "glob": "**/*.txt",
+        "optional": true,
+        "instruction_prefix": "Create ASCII art in the style of"
+      }
+    ]
+  },
+  "quantization": {
+    "load_in_4bit": true,
+    "bnb_4bit_quant_type": "nf4",
+    "bnb_4bit_use_double_quant": true,
+    "bnb_4bit_compute_dtype": "bfloat16"
+  },
+  "lora": {
+    "r": 64,
+    "alpha": 128,
+    "dropout": 0.05,
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ]
+  },
+  "training": {
+    "output_dir": "outputs/dolphin-ascii-lora",
+    "num_train_epochs": 1,
+    "max_steps": 3000,
+    "per_device_train_batch_size": 2,
+    "gradient_accumulation_steps": 16,
+    "learning_rate": 0.0002,
+    "weight_decay": 0.01,
+    "warmup_ratio": 0.03,
+    "lr_scheduler_type": "cosine",
+    "max_grad_norm": 1.0,
+    "logging_steps": 1,
+    "save_steps": 250,
+    "save_total_limit": 3,
+    "bf16": true,
+    "fp16": false,
+    "gradient_checkpointing": true,
+    "optim": "paged_adamw_8bit",
+    "report_to": "none",
+    "dataloader_num_workers": 0,
+    "debug": {
+      "enabled": true,
+      "detect_anomaly": true,
+      "preview_samples": 8,
+      "log_level": "DEBUG"
+    }
+  },
+  "generation": {
+    "max_new_tokens": 320,
+    "temperature": 0.8,
+    "top_p": 0.92,
+    "do_sample": true,
+    "repetition_penalty": 1.05
+  }
+}
