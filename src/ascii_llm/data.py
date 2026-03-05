@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
-from datasets import Dataset, concatenate_datasets, load_dataset
+from datasets import Dataset, DownloadConfig, concatenate_datasets, load_dataset
 from torch.utils.data import IterableDataset as TorchIterableDataset
 from torch.utils.data import get_worker_info
 
@@ -179,14 +179,35 @@ def iter_hf_source_records(
     split = source_cfg.get("split", "train")
     streaming = bool(source_cfg.get("streaming", False))
     instruction_fallback = source_cfg.get("instruction_fallback", "Generate ASCII art matching the user request.")
+    local_files_only = bool(source_cfg.get("local_files_only", False))
+    download_mode = source_cfg.get("download_mode")
+    verification_mode = source_cfg.get("verification_mode")
+
+    source_path: Any = source_name
+    if Path(source_name).exists():
+        source_path = str(Path(source_name))
+
+    load_kwargs: Dict[str, Any] = {
+        "split": split,
+        "cache_dir": cache_dir,
+        "streaming": streaming,
+    }
+    if local_files_only:
+        load_kwargs["download_config"] = DownloadConfig(local_files_only=True)
+    if download_mode:
+        load_kwargs["download_mode"] = download_mode
+    if verification_mode:
+        load_kwargs["verification_mode"] = verification_mode
 
     try:
-        dataset = load_dataset(
-            source_name,
-            split=split,
-            cache_dir=cache_dir,
-            streaming=streaming,
-        )
+        dataset = load_dataset(source_path, **load_kwargs)
+    except TypeError as exc:
+        # Keep compatibility with older datasets versions lacking some kwargs.
+        if "verification_mode" in str(exc):
+            load_kwargs.pop("verification_mode", None)
+            dataset = load_dataset(source_path, **load_kwargs)
+        else:
+            raise
     except Exception:
         if source_cfg.get("optional", False):
             LOGGER.exception("Skipping optional source that failed to load: %s", source_name)
@@ -317,8 +338,13 @@ def format_training_text(instruction: str, ascii_art: str, system_prompt: str) -
     return f"### Instruction\n{instruction.strip()}\n\n### ASCII Art\n{ascii_art.rstrip()}"
 
 
-def iter_training_texts(dataset_cfg: Dict[str, Any], seed: int, system_prompt: str) -> Iterator[str]:
-    for record in iter_training_records(dataset_cfg=dataset_cfg, seed=seed, force_streaming=True):
+def iter_training_texts(
+    dataset_cfg: Dict[str, Any],
+    seed: int,
+    system_prompt: str,
+    force_streaming: bool = True,
+) -> Iterator[str]:
+    for record in iter_training_records(dataset_cfg=dataset_cfg, seed=seed, force_streaming=force_streaming):
         yield format_training_text(
             instruction=record["instruction"],
             ascii_art=record["ascii_art"],
@@ -334,6 +360,7 @@ class HFTokenStreamingDataset(TorchIterableDataset):
         tokenizer: Any,
         max_seq_length: int,
         system_prompt: str,
+        force_streaming: bool = True,
     ) -> None:
         super().__init__()
         self.dataset_cfg = dataset_cfg
@@ -341,6 +368,7 @@ class HFTokenStreamingDataset(TorchIterableDataset):
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
         self.system_prompt = system_prompt
+        self.force_streaming = force_streaming
         self.estimated_samples, _ = estimate_training_samples(dataset_cfg)
 
     def __len__(self) -> int:
@@ -355,7 +383,7 @@ class HFTokenStreamingDataset(TorchIterableDataset):
             iter_training_records(
                 dataset_cfg=self.dataset_cfg,
                 seed=self.seed,
-                force_streaming=True,
+                force_streaming=self.force_streaming,
             )
         ):
             if (idx % worker_count) != worker_id:

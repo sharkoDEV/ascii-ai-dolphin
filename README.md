@@ -106,6 +106,8 @@ Main file: `config.json`
 Key sections:
 
 - `base_model`: HF model ID to load.
+- `hf_cache_dir`: local Hugging Face cache root (inside this repo).
+- `dataset.cache_dir`: local datasets cache directory.
 - `dataset.sources`: list of dataset sources (HF + optional local emporium).
 - `quantization`: 4-bit loading options.
 - `lora`: LoRA rank/alpha/dropout/target modules.
@@ -122,6 +124,7 @@ Default datasets in config:
 ## Dataset Download
 
 You can either snapshot full dataset repos locally, or just warm the HF cache.
+By default, model and dataset cache are stored in this repo under `cache/hf`.
 
 ### Snapshot method (full local copy)
 
@@ -162,6 +165,18 @@ Training uses streaming records and dynamic padding in the collator.
 ```powershell
 .\.venv\Scripts\python.exe train_ascii.py --config config.json
 ```
+
+### Train without dataset recheck/download
+
+Use this when you already warmed cache/snapshots and want local-only dataset loading.
+
+```powershell
+.\.venv\Scripts\python.exe train_ascii.py --config config.json --offline-datasets --skip-dataset-preview
+```
+
+Notes:
+- `--offline-datasets`: forces local cache/snapshot only and disables HF dataset network calls.
+- `--skip-dataset-preview`: skips the startup preview pass (avoids a second dataset load before training).
 
 ### Debug modes
 

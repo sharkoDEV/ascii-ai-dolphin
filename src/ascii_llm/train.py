@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import logging
+import os
 from itertools import islice
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -17,6 +20,7 @@ from transformers import (
 )
 
 from .data import HFTokenStreamingDataset, iter_training_texts
+from .hf_cache import ensure_local_hf_cache
 from .runtime import build_quantization_config, read_config, to_torch_dtype
 
 LOGGER = logging.getLogger(__name__)
@@ -28,6 +32,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prepare-only", action="store_true", help="Preview streamed dataset only.")
     parser.add_argument("--debug", action="store_true", help="Force debug logs.")
     parser.add_argument("--no-debug", action="store_true", help="Disable debug logs.")
+    parser.add_argument(
+        "--offline-datasets",
+        action="store_true",
+        help="Use local dataset cache/snapshots only (no Hugging Face dataset network calls).",
+    )
+    parser.add_argument(
+        "--skip-dataset-preview",
+        action="store_true",
+        help="Skip the startup dataset preview step.",
+    )
     return parser.parse_args()
 
 
@@ -54,9 +68,26 @@ def setup_logging(config: Dict[str, Any], debug_enabled: bool) -> None:
     )
 
 
-def preview_stream(dataset_cfg: Dict[str, Any], seed: int, system_prompt: str, count: int) -> None:
+def preview_stream(
+    dataset_cfg: Dict[str, Any],
+    seed: int,
+    system_prompt: str,
+    count: int,
+    force_streaming: bool,
+) -> None:
     LOGGER.info("Streaming preview (line-by-line) ...")
-    for idx, text in enumerate(islice(iter_training_texts(dataset_cfg, seed, system_prompt), count), start=1):
+    for idx, text in enumerate(
+        islice(
+            iter_training_texts(
+                dataset_cfg=dataset_cfg,
+                seed=seed,
+                system_prompt=system_prompt,
+                force_streaming=force_streaming,
+            ),
+            count,
+        ),
+        start=1,
+    ):
         LOGGER.info("sample=%s | chars=%s", idx, len(text))
 
 
@@ -79,6 +110,36 @@ def maybe_enable_anomaly_detection(config: Dict[str, Any], debug_enabled: bool) 
     if detect:
         torch.autograd.set_detect_anomaly(True)
         LOGGER.warning("Autograd anomaly detection is enabled (slower).")
+
+
+def _safe_repo_dir_name(repo_id: str) -> str:
+    return repo_id.replace("/", "__")
+
+
+def build_runtime_dataset_cfg(dataset_cfg: Dict[str, Any], offline_datasets: bool) -> Dict[str, Any]:
+    runtime_cfg = copy.deepcopy(dataset_cfg)
+    if not offline_datasets:
+        return runtime_cfg
+
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
+    snapshot_root = Path(str(runtime_cfg.get("snapshot_dir", "data/raw/hf")))
+    for source in runtime_cfg.get("sources", []):
+        if source.get("type") != "huggingface":
+            continue
+
+        source["streaming"] = False
+        source["local_files_only"] = True
+        source.setdefault("download_mode", "reuse_dataset_if_exists")
+        source.setdefault("verification_mode", "no_checks")
+
+        source_name = str(source.get("name", ""))
+        local_snapshot = snapshot_root / _safe_repo_dir_name(source_name)
+        if local_snapshot.exists():
+            source["name"] = str(local_snapshot.resolve())
+
+    return runtime_cfg
 
 
 def build_lm_collator(tokenizer):
@@ -123,6 +184,8 @@ def build_lm_collator(tokenizer):
 def main() -> None:
     args = parse_args()
     config = read_config(args.config)
+    cache_paths = ensure_local_hf_cache(config, config_path=args.config)
+    model_cache_dir = cache_paths["hub"]
     debug_enabled = resolve_debug_enabled(config=config, args=args)
     setup_logging(config=config, debug_enabled=debug_enabled)
 
@@ -131,13 +194,25 @@ def main() -> None:
     maybe_enable_anomaly_detection(config=config, debug_enabled=debug_enabled)
 
     dataset_cfg = config.get("dataset", {})
-    preview_count = int(config.get("training", {}).get("debug", {}).get("preview_samples", 8 if debug_enabled else 3))
-    preview_stream(
+    runtime_dataset_cfg = build_runtime_dataset_cfg(
         dataset_cfg=dataset_cfg,
-        seed=seed,
-        system_prompt=config.get("system_prompt", ""),
-        count=preview_count,
+        offline_datasets=bool(args.offline_datasets),
     )
+
+    if args.offline_datasets:
+        LOGGER.info("Datasets are running in offline mode (local cache/snapshots only).")
+
+    preview_count = int(config.get("training", {}).get("debug", {}).get("preview_samples", 8 if debug_enabled else 3))
+    if args.skip_dataset_preview:
+        LOGGER.info("Skipping dataset preview (--skip-dataset-preview).")
+    else:
+        preview_stream(
+            dataset_cfg=runtime_dataset_cfg,
+            seed=seed,
+            system_prompt=config.get("system_prompt", ""),
+            count=preview_count,
+            force_streaming=not args.offline_datasets,
+        )
     if args.prepare_only:
         LOGGER.info("prepare-only complete")
         return
@@ -148,7 +223,11 @@ def main() -> None:
     training_cfg = config.get("training", {})
     lora_cfg = config.get("lora", {})
 
-    tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=trust_remote_code)
+    tokenizer = AutoTokenizer.from_pretrained(
+        base_model,
+        trust_remote_code=trust_remote_code,
+        cache_dir=model_cache_dir,
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -160,6 +239,7 @@ def main() -> None:
         quantization_config=quant_cfg,
         torch_dtype=dtype,
         device_map="auto",
+        cache_dir=model_cache_dir,
     )
     model.config.use_cache = False
 
@@ -180,11 +260,12 @@ def main() -> None:
     print_trainable_parameters(model)
 
     train_dataset = HFTokenStreamingDataset(
-        dataset_cfg=dataset_cfg,
+        dataset_cfg=runtime_dataset_cfg,
         seed=seed,
         tokenizer=tokenizer,
         max_seq_length=max_seq_length,
         system_prompt=config.get("system_prompt", ""),
+        force_streaming=not args.offline_datasets,
     )
 
     output_dir = training_cfg.get("output_dir", "outputs/dolphin-ascii-lora")
